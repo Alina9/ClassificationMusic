@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader
 from sklearn.model_selection import train_test_split
 from music_features import Audio_features
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+import multiprocessing.dummy as multiprocessing
 
 
 class Data:
@@ -39,7 +39,7 @@ class Data:
     def __getitem__(self, index):
         elem = self.audio_paths[index]
         genre = elem.split('.')[0]
-        x = madmom.audio.signal.Signal("../genres/genres/" + genre + "/" + self.audio_paths[index], sample_rate=None,
+        x = madmom.audio.signal.Signal("genres/genres/" + genre + "/" + self.audio_paths[index], sample_rate=None,
                                        num_channels=1, channel=None, dtype="float32")
 
         x = x[:x.sample_rate * self.sec]
@@ -90,7 +90,9 @@ class MusicalClassifierNet(nn.Module):
 
 
 class MusicalClassifier:
-    def __init__(self, epoch, batch_size, train, val, fps=10, dropp_lr_epoch=[None]):
+    def __init__(self, epoch, batch_size, train, val,
+                 net_args={"hidden_channels1": 64, "hidden_channels2": 128, "hidden_channels3": 64, "out_channels": 32},
+                 fps=10, dropp_lr_epoch=[None], device='cpu'):
         """
         MusicalClassifier
         :param epoch: number of epoch
@@ -103,10 +105,10 @@ class MusicalClassifier:
 
         self.data_val = Data(val, fps=fps)
         self.valloader = DataLoader(self.data_val, batch_size=1, shuffle=True)
-
+        self.device = device
         self.epoch = epoch
-        self.classifier = MusicalClassifierNet(15, 64, 128, 64, 32, 10)
-        self.classifier = self.classifier.to(device)
+        self.classifier = MusicalClassifierNet(15, **net_args, classes=10)
+        self.classifier = self.classifier.to(self.device)
         self.optimizer = optim.Adam(self.classifier.parameters(), 1e-3)
         self.criterion = nn.CrossEntropyLoss()
         self.dropp_lr_epoch = dropp_lr_epoch
@@ -128,8 +130,8 @@ class MusicalClassifier:
             step = 0
             for x, y in self.trainloader:
                 step += 1
-                x = x.to(device)
-                y = y.to(device)
+                x = x.to(self.device)
+                y = y.to(self.device)
 
                 model_prob_labels = self.classifier(x)
                 _, predict_labels = torch.max(F.softmax(model_prob_labels, -1), 1)
@@ -148,7 +150,7 @@ class MusicalClassifier:
             list_loss_t.append(avg_loss)
             list_acc_t.append(avg_acc)
             print("Epoch: {}, epoch_loss: {:.5}, accuracy: {:.5}".format((ep + 1), avg_loss, avg_acc))
-            self.save(f'../{p}/{ep}_classifier.pkl')
+            self.save(f'{p}/{ep}_classifier.pkl')
 
             # validation
 
@@ -160,7 +162,7 @@ class MusicalClassifier:
             list_acc_v.append(acc_val)
             print("VALIDATION! Epoch: {}, loss: {:.5}, accuracy: {:.5}".format((ep + 1), loss_val, acc_val))
 
-        self.save(f'../{p}/end_classifier.pkl')
+        self.save(f'{p}/end_classifier.pkl')
         return list_loss_t, list_acc_t, list_loss_v, list_acc_v
 
     def save(self, path):
@@ -184,22 +186,45 @@ class MusicalClassifier:
         return loss / len(data), acc / len(data)
 
 
+def train_net(arg_list):
+    print(p)
+    data, device_name, net_args, dropp_lr_epoch = arg_list
+    data_train, data_test = train_test_split(data, test_size=0.2)
+    data_val, data_test = train_test_split(data_test, test_size=0.5)
+    device = torch.device(device_name)
+    mus_class = MusicalClassifier(100, 128, data_train, data_val, net_args, fps=25, dropp_lr_epoch=dropp_lr_epoch)
+    list_loss_t, list_acc_t, list_loss_v, list_acc_v = mus_class.train()
+
+    val = pd.DataFrame({"loss": list_loss_v, "acc": list_acc_v})
+    val.to_csv(f'{p}/validation_{device_name}.csv', sep=',', index=False)
+
+    tr = pd.DataFrame({"loss": list_loss_t, "acc": list_acc_t})
+    tr.to_csv(f'{p}/train_{device_name}.csv', sep=',', index=False)
+
+
 if __name__ == "__main__":
     data = []
     p = "exp1"
     classes = ('blues', 'classical', 'country', 'disco', 'hiphop', 'jazz', 'metal', 'pop', 'reggae', 'rock')
     for c in classes:
-        names = os.listdir("../genres/genres/" + c)
+        names = os.listdir("genres/genres/" + c)
         data.extend(names)
-    data_train, data_test = train_test_split(data, test_size=0.2)
-    data_val, data_test = train_test_split(data_test, test_size=0.5)
 
-    mus_class = MusicalClassifier(100, 128, data_train, data_val, fps=25, dropp_lr_epoch=(50, 70, 90))
+    arg_list = [(data, 'cuda:0',
+                 {"hidden_channels1": 32, "hidden_channels2": 64, "hidden_channels3": 32, "out_channels": 32},
+                 (50, 70, 90)),
+                (data, 'cuda:1',
+                 {"hidden_channels1": 16, "hidden_channels2": 24, "hidden_channels3": 32, "out_channels": 32},
+                 (50, 70, 90)),
+                (data, 'cuda:2',
+                 {"hidden_channels1": 20, "hidden_channels2": 30, "hidden_channels3": 40, "out_channels": 40},
+                 (50, 70, 90)),
+                (data, 'cuda:3',
+                 {"hidden_channels1": 64, "hidden_channels2": 128, "hidden_channels3": 64, "out_channels": 32},
+                 (50, 70, 90))]
 
-    list_loss_t, list_acc_t, list_loss_v, list_acc_v = mus_class.train()
+    mp = multiprocessing.Pool(processes=22)
+    mp.map(train_net, arg_list)
 
-    val = pd.DataFrame({"loss": list_loss_v, "acc": list_acc_v})
-    val.to_csv(f'../{p}/validation.csv', sep=',', index=False)
-
-    tr = pd.DataFrame({"loss": list_loss_t, "acc": list_acc_t})
-    tr.to_csv(f'../{p}/train.csv', sep=',', index=False)
+    mp.close()
+    mp.join()
